@@ -1,477 +1,512 @@
 #!/usr/bin/env python3
-"""Render the 26 November 2026 world-news poster (1024x1024 PNG).
+"""Render THE WORLD TODAY — the 26 November 2026 world-news poster.
 
-52 stories from the sourced ledger stories.md: 3 illustrated leads, 12 grid
-cards, 37 one-liners, a UTC timeline strip, a numbered schematic map, and a
-DATE CHECK box listing older stories deliberately left out. Deterministic:
-no network, no clock, no randomness. Writes entry.png beside this file.
-
-Layout is drawn by small section builders over one shared canvas. Story
-data lives in plain tuples at the top; the map continents are stored as
-space-separated "lon,lat" strings and parsed at draw time.
+One 1024x1024 image: masthead, three illustrated lead stories, twelve
+numbered grid cards, a UTC timeline strip, 37 one-line stories, a numbered
+schematic world map, a DATE CHECK box and a footer. All story wording comes
+from the day's ledger (stories.md); nothing is fetched from the network.
+Pillow + DejaVu only. Output is deterministic: same input, same PNG bytes.
 """
+import hashlib
 import math
 import os
+
 from PIL import Image, ImageDraw, ImageFont
 
-SIZE = (1024, 1024)
-COLORS = {
-    "paper": (248, 244, 232), "ink": (25, 25, 25), "muted": (90, 86, 76),
-    "red": (166, 30, 30), "blue": (30, 78, 138), "navy": (16, 42, 84),
-    "teal": (15, 107, 92), "gold": (154, 106, 0), "line": (201, 194, 176),
-    "card": (255, 255, 255), "mapfill": (216, 210, 192),
-    "mapline": (138, 132, 113), "white": (255, 255, 255),
-}
+W, H = 1024, 1024
 FONT_DIR = "/usr/share/fonts/truetype/dejavu"
 
+CREAM = (248, 244, 232)
+INK = (20, 18, 16)
+RED = (166, 30, 30)
+BLUE = (47, 74, 107)
+GOLD = (138, 109, 0)
+GREEN = (46, 125, 50)
+GRAY = (110, 100, 88)
+CARD_BORDER = (185, 178, 164)
+LAND = (216, 210, 192)
+WHITE = (255, 255, 255)
 
-def load_font(name, size):
-    try:
-        return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
-    except OSError:
-        return ImageFont.load_default()
-
-
-TITLE_F = load_font("DejaVuSans-Bold.ttf", 46)
-DATE_F = load_font("DejaVuSans-Bold.ttf", 19)
-SUB_F = load_font("DejaVuSans-Bold.ttf", 13)
-SECTION_F = load_font("DejaVuSans-Bold.ttf", 12)
-TAG_F = load_font("DejaVuSans-Bold.ttf", 11)
-LEAD_HEAD_F = load_font("DejaVuSans-Bold.ttf", 16)
-LEAD_SUM_F = load_font("DejaVuSans.ttf", 12)
-GRID_HEAD_F = load_font("DejaVuSans-Bold.ttf", 12)
-GRID_SUM_F = load_font("DejaVuSans.ttf", 11)
-ONE_F = load_font("DejaVuSans.ttf", 10)
-SMALL_F = load_font("DejaVuSans.ttf", 10)
-SMALL_B_F = load_font("DejaVuSans-Bold.ttf", 10)
-TINY_F = load_font("DejaVuSans.ttf", 9)
-MAP_NUM_F = load_font("DejaVuSans-Bold.ttf", 10)
-
-# --- story data: (number, region, headline, summary, source, accent, status) ---
-LEADS = [
-    (1, "WAR · MIDDLE EAST", "Houthis hit Saudi Arabia's biggest oil refinery",
-     "Houthis say they struck the kingdom's largest refinery; oil jumps on supply fears.",
-     "Reuters", "red", "CLAIM"),
-    (2, "US · THANKSGIVING", "Macy's parade postponed — a first in 100 years",
-     "The 100th parade moves to Saturday as a nor'easter bears down on New York.",
-     "AP / Al Jazeera", "blue", "CONFIRMED"),
-    (3, "ASIA", "Kim: North Korea should widen use of tactical nukes",
-     "Kim inspects nuclear sites with his daughter and calls for diversified deployment.",
-     "AP", "ink", "CONFIRMED"),
-]
-
-GRID = [
-    (4, "DISASTER · CAIRO", "Cairo fuel tanker fire kills at least 30",
-     "A fuel truck overturns on the ring road and bursts into flames; 25 hurt.",
-     "SCMP", "red", "CONFIRMED"),
-    (5, "JUSTICE · ISRAEL", "Judges urge dropping Netanyahu bribery case",
-     "Judges say conviction unlikely; Netanyahu demands his trial end at once.",
-     "AP", "blue", "CONFIRMED"),
-    (6, "TECH · US", "US split over Alice Huang spying claims",
-     "Officials divided on whether Huang was a Chinese spy; FBI finds no evidence.",
-     "Reuters", "red", "CLAIM"),
-    (7, "MARKETS · ASIA", "Asia shares bounce; Nikkei +1.6%, Kospi +1.9%",
-     "Wall Street recoups most early losses; Nvidia ends -3.9% at $149.30.",
-     "Reuters", "teal", "CONFIRMED"),
-    (8, "ECONOMY · US", "US Q3 growth revised up to 4.3%",
-     "Growth revised sharply higher; core inflation hits an uncomfortable 3.3%.",
-     "Reuters", "gold", "CONFIRMED"),
-    (9, "DISASTER · ASIA", "Indonesia mine search resumes; 13 dead, 13 trapped",
-     "Rescuers return to an illegal gold mine in West Java after 13 deaths.",
-     "Reuters", "red", "CONFIRMED"),
-    (10, "US · LAW", "Second judge blocks Trump's birthright order",
-     "Trump's newest order curtailing birthright citizenship is blocked again.",
-     "Japan Times", "blue", "CONFIRMED"),
-    (11, "EUROPE · UK", "UK to put EU deal to parliament for approval",
-     "The British government will submit its EU deal for parliament's approval.",
-     "AP", "blue", "CONFIRMED"),
-    (12, "US · IOWA", "Iowa blast a 'tremendous success'; no airborne lead",
-     "Army detonates 5 tons of lead azide; officials say zero airborne lead found.",
-     "AP / ABC", "teal", "CONFIRMED"),
-    (13, "SPACE · US", "SpaceX wins approval to launch space data centres",
-     "US government approves SpaceX plan to put data centres in orbit.",
-     "Japan Times", "ink", "CONFIRMED"),
-    (14, "ASIA", "Hong Kong marks a year since the Tai Po fire",
-     "A year on, Hong Kong remembers the 168 people killed in the fire.",
-     "Japan Times", "gold", "CONFIRMED"),
-    (15, "SPORT · EUROPE", "Champions League: Liverpool 3-0, Real Madrid 5-1",
-     "Isak scores twice as Liverpool beat Brugge; Real hit five past PSV.",
-     "BBC / Sky", "gold", "CONFIRMED"),
-]
-
-# one-liners: (number, region, text) — kept short to fit two lines per column
-ONELINERS = [
-    (16, "US", "US famine monitor to halt reporting as funding shortfall hits staff."),
-    (17, "AF", "African insurgents take war to the skies with off-the-shelf drones."),
-    (18, "EU", "Merz: 'Russia wants more than Ukraine' as he defends Kyiv aid."),
-    (19, "AS", "Chinese firms pose growing competitive threat to Japanese firms, JETRO finds."),
-    (20, "AS", "Uber names Rakesh Ranjan president for India and South Asia."),
-    (21, "US", "Judge declines long-term ban on taxpayer-funded pro-Trump ads."),
-    (22, "US", "US travellers face long airport lines, bad weather before Thanksgiving."),
-    (23, "US", "King tides, high surf batter California coast."),
-    (24, "US", "FedEx plane overruns Miami runway; airport briefly shut."),
-    (25, "US", "Duran Duran guitarist Andy Taylor dies at 65."),
-    (26, "AS", "Japan may designate secondary capitals in fall 2027."),
-    (27, "US", "MLB sues players' union to block antitrust suit."),
-    (28, "AS", "Mizuho extends banking push to India with Avendus deal."),
-    (29, "AS", "JAXA unveils rover test model for India moon mission."),
-    (30, "AS", "Japan's data centre boom faces revolt from residents."),
-    (31, "US", "New US tariffs would likely lift US sugar prices."),
-    (32, "AS", "Billions in data centre deals grind to halt after chip curbs."),
-    (33, "US", "Vance's Thanksgiving F-bomb grabs attention online."),
-    (34, "WORLD", "Gold eases to $3,566/oz, down ~8% in November."),
-    (35, "WORLD", "OPEC+ to meet Nov 29 on 2027 output policy."),
-    (36, "WORLD", "Brent $94.71, WTI $84.03 as oil rises on supply fears."),
-    (37, "EU", "Denmark bans headscarves for prosecutors."),
-    (38, "AS", "South Africa thrash Bangladesh by innings and 219 runs; Mulder 7/31."),
-    (39, "AS", "India women's hockey climbs to world No.4 after beating Japan."),
-    (40, "AS", "Nagaland United win Northeast derby, move second."),
-    (41, "AS", "Rajasthan United crush Mohammedan SC 4-0."),
-    (42, "AS", "Priyansh Arya shatters records in Syed Mushtaq Ali Trophy."),
-    (43, "ME", "Gaza winter survival items out of reach for families in need."),
-    (44, "EU", "UK to launch independent inquiry into nuclear testing impact on veterans."),
-    (45, "AF", "Nigeria seizes $220M of meth, arrests 5 Mexican suspects."),
-    (46, "AF", "Haftar makes first formal visit to Turkey."),
-    (47, "AS", "Community cafeterias for kids in Japan hit record 13,800."),
-    (48, "AS", "Japan to extend tax break for inherited home sales by four years."),
-    (49, "ME", "Israel raids homes in south Syria, detains residents."),
-    (50, "US", "New Jersey declares state of emergency ahead of storm."),
-    (51, "WORLD", "S&P 500 futures +0.5%, Nasdaq +0.4% early Thursday."),
-    (52, "WORLD", "Dollar index eases to 103.71; Swiss franc gains."),
-]
-
-# timeline: (hour_utc, label) — spaced so no two labels share a row nearby
-TIMELINE = [
-    (0.5, "Macy's postponed"), (2.0, "Oil jumps"),
-    (3.5, "Cairo toll 30"), (5.5, "Asia bounce"),
-    (7.5, "Kim sites"), (9.5, "UK EU deal"),
-    (11.5, "Birthright blocked"), (13.5, "Iowa success"),
-    (15.5, "SpaceX approval"), (18.0, "UCL 3-0"),
-]
-
-DATE_CHECK = [
-    "Shenzhou 24 launches — 24 Nov (AP).",
-    "Huawei guilty of trade-secret theft — 24 Nov (AP).",
-    "Democrats clinch House majority of 259 — 25 Nov (AP).",
-    "US announces tariffs on China, EU, 14 others — 25 Nov (AP).",
-    "Samara refineries hit — 25 Nov (Kyiv Independent).",
-    "EU unveils 50bn euro tech fund — 25 Nov (Reuters/FT).",
-]
-
-# map pins: (story number, lon, lat, badge_dx, badge_dy)
-PINS = [(1, 50.1, 26.6, 0, -14), (2, -74, 40.7, -16, 12), (3, 127, 39, 0, -14),
-        (4, 31.2, 30.0, 12, -12), (5, 35.2, 31.8, 14, 8), (6, -77, 38.9, 0, -14),
-        (7, 139.7, 35.7, 0, 0), (8, -77, 38.9, 14, 10), (9, 107.6, -6.8, 0, 0),
-        (10, -77, 38.9, -16, 8), (11, -0.1, 51.5, 0, -14), (12, -93.5, 41.6, 0, 0),
-        (13, -80.6, 28.4, 0, 0), (14, 114.2, 22.3, 0, 0), (15, -3.0, 53.4, 0, -14)]
-
-# Continents as "lon,lat" strings (one per landmass), parsed at draw time.
-LAND = [
-    "-168,66 -140,70 -125,72 -110,73 -95,80 -85,70 -75,62 -60,47 -70,42 "
-    "-80,32 -85,25 -97,26 -105,20 -110,23 -125,40 -145,60 -165,60",
-    "-80,10 -70,11 -60,5 -50,0 -40,-5 -35,-10 -40,-20 -48,-28 -58,-35 "
-    "-65,-40 -70,-50 -73,-35 -75,-20 -80,-5",
-    "-10,36 -5,43 0,50 5,58 10,57 18,56 23,60 30,70 35,68 40,60 30,50 "
-    "28,45 20,40 12,44 3,42 -2,37 -9,38",
-    "-17,15 -10,30 0,35 10,37 20,32 30,31 35,28 40,15 48,11 51,2 40,-5 "
-    "35,-15 30,-25 20,-35 15,-30 12,-18 9,-1 8,4 -8,5 -15,11",
-    "40,70 50,72 60,70 70,72 80,73 90,75 110,76 130,72 150,70 170,66 178,65 "
-    "170,60 160,55 155,50 145,45 140,40 135,35 130,33 127,35 122,38 120,30 "
-    "110,20 108,12 105,8 100,6 97,10 95,16 90,22 85,20 80,13 77,8 72,20 "
-    "66,25 60,25 55,26 50,29 48,30 44,29 40,32 38,36 35,36 30,36 27,37 "
-    "23,36 26,40 28,45 30,50 32,55 35,60 38,65",
-    "113,-22 114,-30 115,-35 120,-34 129,-32 137,-35 140,-38 145,-38 150,-37 "
-    "153,-32 153,-27 150,-22 146,-19 142,-11 137,-12 132,-12 126,-14 122,-17 "
-    "118,-20",
-]
+SERIF_BOLD = "DejaVuSerif-Bold.ttf"
+SANS = "DejaVuSans.ttf"
+SANS_BOLD = "DejaVuSans-Bold.ttf"
 
 
-def fit_text(draw, text, fnt, max_w):
-    """Greedy word wrap to a pixel width; returns the lines."""
-    words = text.split()
+def font(name, size):
+    return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
+
+
+def wrap(text, fnt, width):
+    """Greedy word wrap measured with the real font; returns a line list."""
     lines, cur = [], ""
-    for word in words:
+    for word in text.split():
         trial = (cur + " " + word).strip()
-        if draw.textlength(trial, font=fnt) <= max_w or not cur:
+        if fnt.getlength(trial) <= width:
             cur = trial
         else:
-            lines.append(cur)
+            if cur:
+                lines.append(cur)
             cur = word
     if cur:
         lines.append(cur)
     return lines
 
 
-def put_lines(draw, x, y, lines, fnt, fill, leading=None):
-    step = leading if leading is not None else int(fnt.size * 1.25)
+def text_block(draw, x, y, lines, fnt, fill, leading):
+    """Draw lines top-to-bottom; returns the y just below the last line."""
     for line in lines:
         draw.text((x, y), line, font=fnt, fill=fill)
-        y += step
+        y += leading
     return y
 
 
-def lead_artwork(draw, box, kind, accent_name):
-    """Small programmatic illustration for a lead card."""
-    accent = COLORS[accent_name]
-    white = COLORS["white"]
-    dark = COLORS["ink"]
-    x0, y0, x1, y1 = box
-    draw.rectangle(box, fill=accent)
-    if kind == "refinery":
-        # Oil refinery at night: distillation towers, flare stack, orange
-        # flame burst over the plant.
-        base = y1 - 12
-        towers = [(x0 + 20, 30), (x0 + 58, 44), (x0 + 100, 34), (x0 + 142, 48),
-                  (x0 + 186, 36), (x0 + 228, 42), (x0 + 268, 28)]
-        for bx, bh in towers:
-            draw.rectangle([bx, base - bh, bx + 26, base], fill=(52, 48, 44),
-                           outline=dark, width=1)
-            draw.rectangle([bx + 8, base - bh - 10, bx + 18, base - bh],
-                           fill=(52, 48, 44), outline=dark, width=1)
-            for wy in range(base - bh + 6, base - 4, 9):
-                for wx in (bx + 5, bx + 15):
-                    draw.rectangle([wx, wy, wx + 3, wy + 3], fill=(255, 200, 90))
-        fx, fy = x0 + 292, y0 + 34
-        for k in range(8):
-            ang = k * 45 + 10
-            ex = fx + int(26 * math.cos(math.radians(ang)))
-            ey = fy + int(26 * math.sin(math.radians(ang)))
-            draw.line([fx, fy, ex, ey], fill=(255, 190, 80), width=3)
-        draw.ellipse([fx - 10, fy - 10, fx + 10, fy + 10], fill=(255, 210, 110),
-                     outline=white, width=2)
-        draw.line([x0, base, x1, base], fill=dark, width=2)
-        draw.text((x0 + 10, y0 + 6), "RAS TANURA", font=TAG_F, fill=white)
-        lab = "BRENT $94.71"
-        tw = draw.textlength(lab, font=TAG_F)
-        draw.text((x1 - 8 - tw, y1 - 20), lab, font=TAG_F, fill=white)
-    elif kind == "balloon":
-        # Thanksgiving parade balloon: a big round balloon on strings over
-        # a crowd, against a storm-grey sky.
-        cx = (x0 + x1) // 2
-        sky = (70, 96, 130)
-        draw.rectangle(box, fill=sky)
-        draw.ellipse([cx - 52, y0 + 8, cx + 52, y0 + 62], fill=(255, 190, 60),
-                     outline=white, width=2)
-        draw.ellipse([cx - 40, y0 + 14, cx - 14, y0 + 32], fill=(255, 215, 120))
-        for dx in (-30, -10, 10, 30):
-            draw.line([cx + dx, y0 + 60, cx + dx // 2, y1 - 22],
-                      fill=white, width=1)
-        for i in range(9):
-            px = x0 + 24 + i * 32
-            draw.ellipse([px, y1 - 22, px + 10, y1 - 12], fill=(40, 44, 58))
-        draw.text((x0 + 10, y0 + 6), "100TH PARADE", font=TAG_F, fill=white)
-        lab = "TO SATURDAY"
-        tw = draw.textlength(lab, font=TAG_F)
-        draw.text((x1 - 8 - tw, y1 - 20), lab, font=TAG_F, fill=white)
-    else:  # "missile": atom symbol — nucleus and three orbit rings
-        cx = (x0 + x1) // 2 - 50
-        cy = y0 + 48
-        ring = (150, 170, 205)
-        draw.ellipse([cx - 40, cy - 20, cx + 40, cy + 20], outline=ring, width=2)
-        draw.ellipse([cx - 20, cy - 28, cx + 20, cy + 28], outline=ring, width=2)
-        draw.line([cx - 34, cy + 24, cx + 34, cy - 24], fill=ring, width=2)
-        draw.line([cx - 34, cy - 24, cx + 34, cy + 24], fill=ring, width=2)
-        draw.ellipse([cx - 9, cy - 9, cx + 9, cy + 9], fill=(255, 90, 60),
-                     outline=white, width=2)
-        draw.text((x0 + 10, y0 + 6), "PYONGYANG", font=TAG_F, fill=white)
-        lab = "TACTICAL NUKES"
-        tw = draw.textlength(lab, font=TAG_F)
-        draw.text((x1 - 8 - tw, y1 - 20), lab, font=TAG_F, fill=white)
+# ---------------------------------------------------------------- data
+LEADS = [
+    {
+        "tag": "1 \u00b7 WAR \u00b7 MIDDLE EAST",
+        "color": RED,
+        "headline": "Houthis hit Saudi Arabia's biggest oil refinery",
+        "summary": ("Houthis say they struck the kingdom's largest refinery; "
+                    "oil jumps as supply fears spread. Brent $94.71."),
+        "source": "Source: Reuters \u00b7 CLAIM",
+        "banner": "refinery",
+        "corner_tl": "RAS TANURA",
+        "corner_br": "BRENT $94.71",
+    },
+    {
+        "tag": "2 \u00b7 US \u00b7 THANKSGIVING",
+        "color": BLUE,
+        "headline": "Macy's parade postponed \u2014 a first in 100 years",
+        "summary": ("The 100th parade moves to Saturday as a nor'easter bears "
+                    "down on New York; 80 million people travelling for the "
+                    "holiday."),
+        "source": "Source: AP / Al Jazeera / Malay Mail \u00b7 CONFIRMED",
+        "banner": "parade",
+        "corner_tl": "100TH PARADE",
+        "corner_br": "TO SATURDAY",
+    },
+    {
+        "tag": "3 \u00b7 ASIA",
+        "color": INK,
+        "headline": "Kim: North Korea should widen use of tactical nukes",
+        "summary": ("Kim Jong Un inspects nuclear sites with his daughter and "
+                    "calls for diversified deployment of tactical nuclear "
+                    "weapons."),
+        "source": "Source: AP / Manila Times \u00b7 CONFIRMED",
+        "banner": "atom",
+        "corner_tl": "PYONGYANG",
+        "corner_br": "TACTICAL NUKES",
+    },
+]
+
+CARDS = [
+    {"n": 4, "tag": "DISASTER \u00b7 CAIRO", "color": RED,
+     "headline": "Cairo fuel tanker fire kills at least 30",
+     "summary": ("A fuel truck overturns on Cairo's ring road and bursts into "
+                "flames; 27 vehicles charred, 25 hurt."),
+     "source": "SCMP / Economic Times \u00b7 CONFIRMED"},
+    {"n": 5, "tag": "JUSTICE \u00b7 ISRAEL", "color": BLUE,
+     "headline": "Judges urge dropping Netanyahu bribery case",
+     "summary": ("Israeli judges recommend prosecutors drop the most serious "
+                "of three corruption cases; Netanyahu demands the trial end."),
+     "source": "AP \u00b7 CONFIRMED"},
+    {"n": 6, "tag": "TECH \u00b7 US", "color": RED,
+     "headline": "US split over Alice Huang spying claims",
+     "summary": ("Officials divided on whether Nvidia CEO's affair partner was "
+                "a Chinese spy; FBI finds no evidence she was an asset."),
+     "source": "Reuters \u00b7 CLAIM"},
+    {"n": 7, "tag": "MARKETS \u00b7 ASIA", "color": BLUE,
+     "headline": "Asia shares bounce; Nikkei +1.6%, Kospi +1.9%",
+     "summary": ("Wall Street recoups most early losses; Nvidia ends -3.9% at "
+                "$149.30, $2.3T below its October peak."),
+     "source": "Reuters \u00b7 CONFIRMED"},
+    {"n": 8, "tag": "ECONOMY \u00b7 US", "color": GOLD,
+     "headline": "US Q3 growth revised up to 4.3%",
+     "summary": ("US economic growth revised sharply higher; core inflation "
+                "hits an uncomfortable 3.3%."),
+     "source": "Reuters \u00b7 CONFIRMED"},
+    {"n": 9, "tag": "DISASTER \u00b7 ASIA", "color": RED,
+     "headline": "Indonesia mine search resumes; 13 dead, 13 trapped",
+     "summary": ("Rescuers return to an illegal gold mine in West Java after 13 "
+                "workers are confirmed dead."),
+     "source": "Reuters \u00b7 CONFIRMED"},
+    {"n": 10, "tag": "US \u00b7 LAW", "color": BLUE,
+     "headline": "Second judge blocks Trump's birthright order",
+     "summary": ("Trump's newest order curtailing birthright citizenship is "
+                "blocked by a second judge."),
+     "source": "Japan Times \u00b7 CONFIRMED"},
+    {"n": 11, "tag": "EUROPE \u00b7 UK", "color": BLUE,
+     "headline": "UK to put EU deal to parliament for approval",
+     "summary": ("The British government will submit its EU deal for "
+                "parliament's approval."),
+     "source": "AP / Manila Times \u00b7 CONFIRMED"},
+    {"n": 12, "tag": "US \u00b7 IOWA", "color": GREEN,
+     "headline": "Iowa blast a 'tremendous success'; no airborne lead",
+     "summary": ("Army detonates 5 tons of lead azide; federal officials say "
+                "zero airborne lead detected."),
+     "source": "AP / ABC \u00b7 CONFIRMED"},
+    {"n": 13, "tag": "SPACE \u00b7 US", "color": INK,
+     "headline": "SpaceX wins approval to launch space data centres",
+     "summary": ("US government approves SpaceX plan to launch data centres "
+                "in orbit."),
+     "source": "Japan Times \u00b7 CONFIRMED"},
+    {"n": 14, "tag": "ASIA", "color": GOLD,
+     "headline": "Hong Kong marks a year since the Tai Po fire",
+     "summary": ("A year on, Hong Kong remembers the 168 people killed in the "
+                "housing complex fire."),
+     "source": "Japan Times \u00b7 CONFIRMED"},
+    {"n": 15, "tag": "SPORT \u00b7 EUROPE", "color": GOLD,
+     "headline": "Champions League: Liverpool 3-0, Real Madrid 5-1",
+     "summary": ("Isak scores twice as Liverpool beat Brugge; Real Madrid hit "
+                "five past PSV; Man City 2-2 Napoli."),
+     "source": "BBC / Sky Sports \u00b7 CONFIRMED"},
+]
+
+ONELINERS = [
+    "16. [US] US famine monitor to halt reporting as funding shortfall hits staff.",
+    "17. [AF] African insurgents take war to the skies with off-the-shelf drones.",
+    "18. [EU] Merz: 'Russia wants more than Ukraine' as he defends Kyiv aid.",
+    "19. [AS] Chinese firms pose growing competitive threat to Japanese firms, JETRO finds.",
+    "20. [AS] Uber names Rakesh Ranjan president for India and South Asia.",
+    "21. [US] Judge declines long-term ban on taxpayer-funded pro-Trump ads.",
+    "22. [US] US travellers face long airport lines, bad weather before Thanksgiving.",
+    "23. [US] King tides, high surf batter California coast.",
+    "24. [US] FedEx plane overruns Miami runway; airport briefly shut.",
+    "25. [US] Duran Duran guitarist Andy Taylor dies at 65.",
+    "26. [AS] Japan may designate secondary capitals in fall 2027.",
+    "27. [US] MLB sues players' union to block antitrust suit.",
+    "28. [AS] Mizuho extends banking push to India with Avendus deal.",
+    "29. [AS] JAXA unveils rover test model for India moon mission.",
+    "30. [AS] Japan's data centre boom faces revolt from residents.",
+    "31. [US] New US tariffs would likely lift US sugar prices.",
+    "32. [AS] Billions in data centre deals grind to halt after chip curbs.",
+    "33. [US] Vance's Thanksgiving F-bomb grabs attention online.",
+    "34. [WORLD] Gold eases to $3,566/oz, down ~8% in November.",
+    "35. [WORLD] OPEC+ to meet Nov 29 on 2027 output policy.",
+    "36. [WORLD] Brent $94.71, WTI $84.03 as oil rises on supply fears.",
+    "37. [EU] Denmark bans headscarves for prosecutors.",
+    "38. [AS] South Africa thrash Bangladesh by innings and 219 runs; Mulder 7/31.",
+    "39. [AS] India women's hockey climbs to world No.4 after beating Japan.",
+    "40. [AS] Nagaland United win Northeast derby, move second.",
+    "41. [AS] Rajasthan United crush Mohammedan SC 4-0.",
+    "42. [AS] Priyansh Arya shatters records in Syed Mushtaq Ali Trophy.",
+    "43. [ME] Gaza winter survival items out of reach for families in need.",
+    "44. [EU] UK to launch independent inquiry into nuclear testing impact on veterans.",
+    "45. [AF] Nigeria seizes $220M of meth, arrests 5 Mexican suspects.",
+    "46. [AF] Haftar makes first formal visit to Turkey.",
+    "47. [AS] Community cafeterias for kids in Japan hit record 13,800.",
+    "48. [AS] Japan to extend tax break for inherited home sales by four years.",
+    "49. [ME] Israel raids homes in south Syria, detains residents.",
+    "50. [US] New Jersey declares state of emergency ahead of storm.",
+    "51. [WORLD] S&P 500 futures +0.5%, Nasdaq +0.4% early Thursday.",
+    "52. [WORLD] Dollar index eases to 103.71; Swiss franc gains.",
+]
+
+# (minutes after 00:00 UTC, label, label above the line?)
+TIMELINE = [
+    (30, "Macy's postponed", True),
+    (97, "Oil jumps", False),
+    (188, "Cairo toll 30", True),
+    (240, "Asia bounce", False),
+    (360, "Kim sites", True),
+    (480, "UK EU deal", False),
+    (600, "Birthright blocked", True),
+    (720, "Iowa success", False),
+    (840, "SpaceX approval", True),
+    (960, "Travel chaos", False),
+    (1080, "UCL 3-0", True),
+]
+
+DATECHECK = [
+    "Shenzhou 24 launches \u2014 24 Nov (AP).",
+    "Huawei guilty of trade-secret theft \u2014 24 Nov (AP).",
+    "Solomon Islands names Australia top partner \u2014 24 Nov (AP).",
+    "Unclassified CIA system breached \u2014 24 Nov (AP).",
+    "Democrats clinch House majority of 259 \u2014 25 Nov (AP).",
+    "US announces tariffs on China, EU, 14 others \u2014 25 Nov (AP).",
+    "Samara refineries hit \u2014 25 Nov (Kyiv Independent).",
+    "EU unveils 50bn euro tech fund \u2014 25 Nov (Reuters/FT).",
+    "Poland asks NATO to down Russian missiles \u2014 25 Nov.",
+    "Shein agrees $100M FTC settlement \u2014 25 Nov (AP).",
+]
+
+# Schematic continents, local coords inside the 332x90 map box.
+CONTINENTS = [
+    [(16, 20), (44, 10), (76, 14), (88, 24), (82, 36), (64, 42),
+     (50, 52), (32, 48), (14, 36)],                       # N. America
+    [(88, 8), (100, 6), (104, 14), (92, 16)],            # Greenland
+    [(64, 52), (80, 50), (92, 60), (88, 78), (74, 84), (62, 66)],  # S. America
+    [(158, 16), (176, 10), (192, 18), (188, 30), (172, 36), (156, 30)],  # Europe
+    [(160, 42), (182, 40), (196, 52), (190, 72), (172, 82),
+     (158, 66), (152, 52)],                               # Africa
+    [(196, 14), (238, 8), (288, 12), (310, 22), (302, 38), (274, 46),
+     (252, 42), (230, 52), (210, 40), (196, 28)],        # Asia
+    [(256, 54), (266, 52), (268, 60), (258, 62)],        # SE Asia islands
+    [(272, 56), (282, 54), (284, 62), (274, 64)],
+    [(282, 66), (306, 64), (312, 74), (296, 80), (282, 76)],  # Australia
+]
+# Story number -> (x, y) on the schematic map.
+MARKERS = {
+    1: (224, 40), 2: (86, 26), 3: (292, 22), 4: (192, 46), 5: (206, 40),
+    6: (22, 32), 7: (306, 34), 8: (68, 22), 9: (264, 60), 10: (94, 40),
+    11: (168, 14), 12: (52, 38), 13: (40, 52), 14: (272, 44), 15: (156, 30),
+}
 
 
-def world_map(draw, x0, y0, x1, y1):
-    red = COLORS["red"]
-    white = COLORS["white"]
-
-    def project(lon, lat):
-        fx = (lon + 170.0) / 360.0
-        fy = (85.0 - lat) / 145.0
-        return (x0 + int(fx * (x1 - x0)), y0 + int(fy * (y1 - y0)))
-
-    for landmass in LAND:
-        pts = []
-        for pair in landmass.split():
-            lon, lat = pair.split(",")
-            pts.append(project(float(lon), float(lat)))
-        draw.polygon(pts, fill=COLORS["mapfill"], outline=COLORS["mapline"])
-    for num, lon, lat, dx, dy in PINS:
-        cx, cy = project(lon, lat)
-        bx, by = cx + dx, cy + dy
-        draw.ellipse([cx - 3, cy - 3, cx + 3, cy + 3], fill=red)
-        if dx or dy:
-            draw.line([cx, cy, bx, by], fill=red, width=1)
-        draw.ellipse([bx - 9, by - 9, bx + 9, by + 9], fill=red,
-                     outline=white, width=1)
-        label = str(num)
-        tw = draw.textlength(label, font=MAP_NUM_F)
-        draw.text((bx - tw / 2, by - 7), label, font=MAP_NUM_F, fill=white)
-    draw.text((x0, y1 - 12), "SCHEMATIC — NOT TO SCALE", font=TINY_F,
-              fill=COLORS["muted"])
+# ---------------------------------------------------------------- banners
+def draw_refinery(draw, x, y, w, h):
+    draw.rectangle([x, y, x + w, y + h], fill=(158, 27, 27))
+    # Sun with rays, top right.
+    cx, cy, r = x + w - 42, y + 22, 13
+    for k in range(8):
+        a = math.pi * k / 4
+        x1 = cx + int((r + 2) * math.cos(a))
+        y1 = cy + int((r + 2) * math.sin(a))
+        x2 = cx + int((r + 8) * math.cos(a))
+        y2 = cy + int((r + 8) * math.sin(a))
+        draw.line([x1, y1, x2, y2], fill=(250, 204, 21), width=2)
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(250, 204, 21))
+    # Refinery skyline: black towers with lit windows.
+    base = y + h
+    towers = [(0, 26, 34), (30, 20, 52), (54, 30, 44), (88, 18, 58),
+              (110, 26, 38), (140, 22, 50), (166, 28, 42), (198, 20, 56),
+              (222, 26, 40), (252, 22, 48), (278, 24, 36)]
+    for tx, tw, th in towers:
+        draw.rectangle([x + tx, base - th, x + tx + tw, base], fill=(24, 20, 18))
+        for wy in range(base - th + 5, base - 4, 9):
+            for wx in range(x + tx + 4, x + tx + tw - 3, 8):
+                draw.rectangle([wx, wy, wx + 3, wy + 4], fill=(250, 204, 21))
 
 
-def masthead(d):
-    ink = COLORS["ink"]
-    red = COLORS["red"]
-    muted = COLORS["muted"]
-    d.rectangle([0, 0, SIZE[0], 6], fill=red)
-    d.text((16, 14), "THE WORLD TODAY", font=TITLE_F, fill=ink)
-    for i, line in enumerate(["THURSDAY", "26 NOVEMBER 2026"]):
-        tw = d.textlength(line, font=DATE_F)
-        d.text((SIZE[0] - 16 - tw, 16 + i * 24), line, font=DATE_F,
-               fill=red if i == 0 else ink)
-    d.text((16, 66), "52 STORIES  ·  5 REGIONS  ·  ONE PAGE  —  THURSDAY 26 NOVEMBER 2026",
-           font=SUB_F, fill=muted)
-    d.line([16, 88, SIZE[0] - 16, 88], fill=ink, width=2)
+def draw_parade(draw, x, y, w, h):
+    draw.rectangle([x, y, x + w, y + h], fill=BLUE)
+    # Big yellow parade balloon with a highlight.
+    draw.ellipse([x + 78, y + 8, x + 250, y + 62], fill=(250, 204, 21))
+    draw.ellipse([x + 100, y + 16, x + 170, y + 38], fill=(253, 224, 71))
+    # Strings down to the handlers, drawn as small dark dots.
+    for dx in range(0, 6):
+        sx = x + 96 + dx * 26
+        draw.line([sx, y + 60, sx - 6 + dx * 2, y + 74], fill=(20, 30, 45),
+                  width=1)
+        draw.ellipse([sx - 9, y + 71, sx - 3, y + 77], fill=(20, 30, 45))
 
 
-def lead_cards(d):
-    kinds = ["refinery", "balloon", "missile"]
-    top, height, width, gap = 96, 184, 322, 8
-    card = COLORS["card"]
-    line = COLORS["line"]
-    ink = COLORS["ink"]
-    muted = COLORS["muted"]
-    for i, (num, region, head, summ, src, accent_name, status) in enumerate(LEADS):
-        accent = COLORS[accent_name]
-        x0 = 16 + i * (width + gap)
-        x1 = x0 + width
-        d.rectangle([x0, top, x1, top + height], fill=card, outline=line, width=1)
-        lead_artwork(d, (x0 + 1, top + 1, x1 - 1, top + 80), kinds[i], accent_name)
-        y = top + 86
-        d.text((x0 + 10, y), f"{num} · {region}", font=TAG_F, fill=accent)
+def draw_atom(img, x, y, w, h):
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([x, y, x + w, y + h], fill=(20, 20, 20))
+    cx, cy = x + w // 2, y + h // 2
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    ld.ellipse([w // 2 - 52, h // 2 - 16, w // 2 + 52, h // 2 + 16],
+               outline=(170, 185, 205, 255), width=2)
+    ld.ellipse([w // 2 - 13, h // 2 - 34, w // 2 + 13, h // 2 + 34],
+               outline=(170, 185, 205, 255), width=2)
+    diag = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    dd = ImageDraw.Draw(diag)
+    dd.ellipse([w // 2 - 52, h // 2 - 16, w // 2 + 52, h // 2 + 16],
+               outline=(170, 185, 205, 255), width=2)
+    diag = diag.rotate(45, resample=Image.BICUBIC, center=(w // 2, h // 2))
+    layer = Image.alpha_composite(layer, diag)
+    img.paste(layer, (x, y), layer)
+    draw.ellipse([cx - 7, cy - 7, cx + 7, cy + 7], fill=RED)
+
+
+# ---------------------------------------------------------------- sections
+def draw_masthead(draw):
+    draw.rectangle([0, 0, W, 6], fill=RED)
+    draw.text((12, 8), "THE WORLD TODAY", font=font(SERIF_BOLD, 58), fill=INK)
+    draw.text((1012, 12), "THURSDAY", font=font(SANS_BOLD, 19),
+              fill=RED, anchor="ra")
+    draw.text((1012, 36), "26 NOVEMBER 2026", font=font(SANS_BOLD, 19),
+              fill=INK, anchor="ra")
+    draw.text((12, 80), "52 STORIES \u00b7 5 REGIONS \u00b7 ONE PAGE \u2014 "
+              "THURSDAY 26 NOVEMBER 2026", font=font(SANS_BOLD, 12),
+              fill=GRAY)
+    draw.rectangle([12, 92, 1012, 94], fill=INK)
+
+
+def draw_leads(img, draw):
+    xs = [12, 353, 694]
+    w, y0 = 318, 100
+    banner_h = 80
+    for lead, x in zip(LEADS, xs):
+        if lead["banner"] == "atom":
+            draw_atom(img, x, y0, w, banner_h)
+        elif lead["banner"] == "parade":
+            draw_parade(draw, x, y0, w, banner_h)
+        else:
+            draw_refinery(draw, x, y0, w, banner_h)
+        small = font(SANS_BOLD, 11)
+        draw.text((x + 8, y0 + 6), lead["corner_tl"], font=small, fill=WHITE)
+        # Bottom-right corner label on a dark chip so it stays readable
+        # over the illustration (towers, balloon strings, atom orbits).
+        br_w = small.getlength(lead["corner_br"])
+        bx0, by0 = x + w - 8 - br_w - 6, y0 + banner_h - 19
+        draw.rectangle([bx0, by0, x + w - 4, y0 + banner_h - 4],
+                       fill=(20, 20, 20))
+        draw.text((x + w - 8, y0 + banner_h - 18), lead["corner_br"],
+                  font=small, fill=WHITE, anchor="ra")
+        y = y0 + banner_h + 6
+        draw.text((x, y), lead["tag"], font=font(SANS_BOLD, 12),
+                  fill=lead["color"])
         y += 16
-        y = put_lines(d, x0 + 10, y, fit_text(d, head, LEAD_HEAD_F, width - 20)[:2],
-                      LEAD_HEAD_F, ink, leading=19)
+        y = text_block(draw, x, y,
+                       wrap(lead["headline"], font(SANS_BOLD, 18), w),
+                       font(SANS_BOLD, 18), INK, 22)
         y += 3
-        y = put_lines(d, x0 + 10, y, fit_text(d, summ, LEAD_SUM_F, width - 20)[:2],
-                      LEAD_SUM_F, ink, leading=15)
-        d.text((x0 + 10, y + 2), f"Source: {src} · {status}", font=TINY_F, fill=muted)
+        y = text_block(draw, x, y, wrap(lead["summary"], font(SANS, 11), w),
+                       font(SANS, 11), INK, 13)
+        y += 4
+        draw.text((x, y), lead["source"], font=font(SANS, 9), fill=GRAY)
 
 
-def grid_cards(d):
-    top, height, width, gap = 288, 96, 242, 8
-    card = COLORS["card"]
-    line = COLORS["line"]
-    ink = COLORS["ink"]
-    white = COLORS["white"]
-    for row in range(3):
-        for col in range(4):
-            num, region, head, summ, src, accent_name, status = GRID[row * 4 + col]
-            accent = COLORS[accent_name]
-            x0 = 16 + col * (width + gap)
-            x1 = x0 + width
-            y0 = top + row * (height + 6)
-            d.rectangle([x0, y0, x1, y0 + height], fill=card, outline=line, width=1)
-            d.ellipse([x0 + 8, y0 + 7, x0 + 26, y0 + 25], fill=accent)
-            label = str(num)
-            tw = d.textlength(label, font=SMALL_B_F)
-            d.text((x0 + 17 - tw / 2, y0 + 10), label, font=SMALL_B_F, fill=white)
-            d.text((x0 + 32, y0 + 9), region, font=TAG_F, fill=accent)
-            y = put_lines(d, x0 + 8, y0 + 28,
-                          fit_text(d, head, GRID_HEAD_F, width - 16)[:2],
-                          GRID_HEAD_F, ink, leading=13)
-            y = put_lines(d, x0 + 8, y + 2,
-                          fit_text(d, summ, GRID_SUM_F, width - 16)[:2],
-                          GRID_SUM_F, ink, leading=12)
-            d.text((x0 + 8, y + 1), f"{src} · {status}", font=TINY_F,
-                   fill=COLORS["muted"])
+def card_text_sizes():
+    """Pick the largest headline/summary sizes whose cards all fit."""
+    for hs, ss in [(13, 10), (12, 10), (12, 9)]:
+        hf, sf = font(SANS_BOLD, hs), font(SANS, ss)
+        ok = True
+        for card in CARDS:
+            hl = wrap(card["headline"], hf, 231)
+            sl = wrap(card["summary"], sf, 231)
+            used = 30 + len(hl) * (hs + 3) + 2 + len(sl) * (ss + 2) + 3 + 10
+            if used > 106:
+                ok = False
+                break
+        if ok:
+            return hs, ss
+    return 12, 9
 
 
-def timeline_strip(d):
-    top, bottom = 596, 656
-    ink = COLORS["ink"]
-    red = COLORS["red"]
-    muted = COLORS["muted"]
-    d.rectangle([16, top, SIZE[0] - 16, bottom], fill=COLORS["card"],
-                outline=COLORS["line"], width=1)
-    base = top + 32
-    d.line([24, base, SIZE[0] - 24, base], fill=ink, width=1)
-    for h in range(0, 25, 4):
-        x = 24 + int(h / 24.0 * (SIZE[0] - 48))
-        d.line([x, base - 3, x, base + 3], fill=ink, width=1)
-        lab = f"{h:02d}:00" + (" UTC" if h == 24 else "")
-        tw = d.textlength(lab, font=TINY_F)
-        lx = min(max(x - tw / 2, 24), SIZE[0] - 24 - tw)
-        d.text((lx, base + 6), lab, font=TINY_F, fill=muted)
-    levels = {"near": base - 13, "below": base + 18, "far": base - 25}
-    order = ["near", "below", "far"]
-    for i, (hour, lab) in enumerate(TIMELINE):
-        x = 24 + int(hour / 24.0 * (SIZE[0] - 48))
-        d.ellipse([x - 3, base - 3, x + 3, base + 3], fill=red)
-        tw = d.textlength(lab, font=TINY_F)
-        lx = min(max(x - tw / 2, 24), SIZE[0] - 24 - tw)
-        d.text((lx, levels[order[i % 3]]), lab, font=TINY_F, fill=ink)
+def draw_grid(draw):
+    hs, ss = card_text_sizes()
+    hf, sf = font(SANS_BOLD, hs), font(SANS, ss)
+    gx = [12, 264, 516, 768]
+    gy = [302, 412, 522]
+    cw, ch = 247, 108
+    for row_i, y in enumerate(gy):
+        for col_i, x in enumerate(gx):
+            card = CARDS[row_i * 4 + col_i]
+            draw.rectangle([x, y, x + cw, y + ch], fill=WHITE,
+                           outline=CARD_BORDER, width=1)
+            cx, cy = x + 17, y + 17
+            draw.ellipse([cx - 9, cy - 9, cx + 9, cy + 9], fill=card["color"])
+            draw.text((cx, cy), str(card["n"]), font=font(SANS_BOLD, 11),
+                      fill=WHITE, anchor="mm")
+            draw.text((x + 30, y + 9), card["tag"], font=font(SANS_BOLD, 11),
+                      fill=card["color"])
+            yy = text_block(draw, x + 8, y + 30,
+                            wrap(card["headline"], hf, 231), hf, INK, hs + 3)
+            yy += 2
+            yy = text_block(draw, x + 8, yy, wrap(card["summary"], sf, 231),
+                            sf, INK, ss + 2)
+            draw.text((x + 8, yy + 3), card["source"], font=font(SANS, 9),
+                      fill=GRAY)
 
 
-def oneliner_columns(d):
-    top = 664
-    ink = COLORS["ink"]
-    d.text((16, top), "THE REST OF THE DAY — 37 MORE STORIES", font=SECTION_F, fill=ink)
-    d.line([16, top + 17, 690, top + 17], fill=ink, width=1)
-    col_w, col_gap = 219, 7
-    groups = [ONELINERS[0:13], ONELINERS[13:25], ONELINERS[25:37]]
-    for ci, group in enumerate(groups):
-        cx = 16 + ci * (col_w + col_gap)
-        y = top + 24
-        for num, region, text in group:
-            first = f"{num}. [{region}] " + text
-            y = put_lines(d, cx, y, fit_text(d, first, ONE_F, col_w)[:2],
-                          ONE_F, ink, leading=11)
+def draw_timeline(draw):
+    x0, x1, y0, y1 = 12, 1012, 638, 692
+    draw.rectangle([x0, y0, x1, y1], fill=WHITE, outline=CARD_BORDER, width=1)
+    axis_y = 664
+    draw.line([x0 + 12, axis_y, x1 - 12, axis_y], fill=(120, 112, 96), width=1)
+    hour_f = font(SANS, 9)
+    for hr in range(0, 25, 4):
+        tx = x0 + 12 + hr / 24 * (x1 - x0 - 24)
+        draw.line([tx, axis_y - 3, tx, axis_y + 3], fill=(120, 112, 96), width=1)
+        label = "24:00 UTC" if hr == 24 else "%02d:00" % hr
+        draw.text((tx, 680), label, font=hour_f, fill=GRAY, anchor="ma")
+    ev_f = font(SANS, 9)
+    for minutes, label, above in TIMELINE:
+        ex = x0 + 12 + minutes / 1440 * (x1 - x0 - 24)
+        draw.ellipse([ex - 4, axis_y - 4, ex + 4, axis_y + 4], fill=RED)
+        lx = min(max(ex, x0 + 52), x1 - 52)
+        ly = 646 if above else 670
+        draw.text((lx, ly), label, font=ev_f, fill=INK, anchor="ma")
+
+
+def oneliner_size():
+    """Largest one-liner font whose tallest column fits the bottom area."""
+    cols = [ONELINERS[0:13], ONELINERS[13:25], ONELINERS[25:37]]
+    for size in [10, 9.5, 9, 8.5, 8]:
+        fnt = font(SANS, size)
+        tallest = 0
+        for col in cols:
+            total = 0
+            for item in col:
+                total += len(wrap(item, fnt, 212)) * (size + 2) + 2
+            tallest = max(tallest, total)
+        if tallest <= 276:
+            return size
+    return 8
+
+
+def draw_bottom(img, draw):
+    draw.text((12, 700), "THE REST OF THE DAY \u2014 37 MORE STORIES",
+              font=font(SANS_BOLD, 13), fill=INK)
+    draw.text((680, 700), "WHERE IT HAPPENED \u2014 STORIES 1\u201315",
+              font=font(SANS_BOLD, 13), fill=INK)
+    draw.line([12, 716, 668, 716], fill=INK, width=1)
+    draw.line([680, 716, 1012, 716], fill=INK, width=1)
+    # One-liners: three columns on the left.
+    size = oneliner_size()
+    fnt = font(SANS, size)
+    cols = [ONELINERS[0:13], ONELINERS[13:25], ONELINERS[25:37]]
+    for col, x in zip(cols, [12, 234, 456]):
+        y = 722
+        for item in col:
+            y = text_block(draw, x, y, wrap(item, fnt, 212), fnt, INK,
+                           size + 2)
             y += 2
+    # Schematic world map, right.
+    mx, my = 680, 722
+    draw.rectangle([mx, my, 1012, 812], fill=WHITE, outline=CARD_BORDER,
+                   width=1)
+    for poly in CONTINENTS:
+        draw.polygon([(mx + px, my + py) for px, py in poly], fill=LAND)
+    for n in range(1, 16):
+        px, py = MARKERS[n]
+        cx, cy = mx + px, my + py
+        draw.ellipse([cx - 7, cy - 7, cx + 7, cy + 7], fill=RED)
+        nf = font(SANS_BOLD, 8 if n >= 10 else 9)
+        draw.text((cx, cy), str(n), font=nf, fill=WHITE, anchor="mm")
+    draw.text((846, 816), "SCHEMATIC \u2014 NOT TO SCALE",
+              font=font(SANS, 9), fill=GRAY, anchor="ma")
+    # DATE CHECK box.
+    draw.text((680, 836), "DATE CHECK \u2014 OLDER STORIES WE LEFT OUT",
+              font=font(SANS_BOLD, 12), fill=RED)
+    draw.line([680, 852, 1012, 852], fill=RED, width=1)
+    y = 858
+    df = font(SANS, 9)
+    for item in DATECHECK:
+        y = text_block(draw, 680, y, wrap("\u00b7 " + item, df, 332), df,
+                       INK, 11)
+    draw.text((680, y + 4), "Everything above is 26 November 2026 news.",
+              font=font(SANS, 9), fill=GRAY)
 
 
-def map_panel(d):
-    mx0, my0, mx1, my1 = 698, 664, 1008, 836
-    ink = COLORS["ink"]
-    d.text((mx0, my0), "WHERE IT HAPPENED — STORIES 1–15", font=SECTION_F, fill=ink)
-    d.rectangle([mx0, my0 + 20, mx1, my1], fill=COLORS["card"],
-                outline=COLORS["line"], width=1)
-    world_map(d, mx0 + 4, my0 + 24, mx1 - 4, my1 - 4)
+def draw_footer(draw):
+    draw.line([12, 1004, 1012, 1004], fill=INK, width=1)
+    draw.text((12, 1009),
+              "CLAIM = an unverified claim, attributed to its source.   "
+              "Sources: Reuters \u00b7 AP \u00b7 SCMP \u00b7 Japan Times \u00b7 "
+              "Al Jazeera \u00b7 Economic Times \u00b7 BBC \u00b7 Sky Sports.",
+              font=font(SANS, 9), fill=GRAY)
 
 
-def date_check_panel(d):
-    mx0, mx1 = 698, 1008
-    top = 846
-    red = COLORS["red"]
-    ink = COLORS["ink"]
-    d.text((mx0, top), "DATE CHECK — OLDER STORIES WE LEFT OUT", font=SECTION_F, fill=red)
-    d.line([mx0, top + 17, mx1, top + 17], fill=red, width=1)
-    y = top + 24
-    for item in DATE_CHECK:
-        y = put_lines(d, mx0, y, fit_text(d, "· " + item, SMALL_F, mx1 - mx0),
-                      SMALL_F, ink, leading=12)
-        y += 3
-    y += 4
-    put_lines(d, mx0, y,
-              fit_text(d, "Everything above is 26 November 2026 news.",
-                       SMALL_F, mx1 - mx0),
-              SMALL_F, ink, leading=12)
-
-
-def footer(d):
-    muted = COLORS["muted"]
-    d.line([16, 1008, SIZE[0] - 16, 1008], fill=COLORS["line"], width=1)
-    d.text((16, 1012),
-           "CLAIM = an unverified claim, attributed to its source.  Sources: Reuters · AP · "
-           "SCMP · Japan Times · Al Jazeera · Economic Times · BBC · Sky Sports.",
-           font=TINY_F, fill=muted)
-
-
-def build_poster():
-    img = Image.new("RGB", SIZE, COLORS["paper"])
-    d = ImageDraw.Draw(img)
-    masthead(d)
-    lead_cards(d)
-    grid_cards(d)
-    timeline_strip(d)
-    oneliner_columns(d)
-    map_panel(d)
-    date_check_panel(d)
-    footer(d)
-    return img
+def main():
+    img = Image.new("RGB", (W, H), CREAM)
+    draw = ImageDraw.Draw(img)
+    draw_masthead(draw)
+    draw_leads(img, draw)
+    draw_grid(draw)
+    draw_timeline(draw)
+    draw_bottom(img, draw)
+    draw_footer(draw)
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
+    img.save(out, "PNG")
+    data = open(out, "rb").read()
+    print("entry.png sha256: %s (%d bytes)"
+          % (hashlib.sha256(data).hexdigest(), len(data)))
 
 
 if __name__ == "__main__":
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
-    build_poster().save(out, "PNG", optimize=True)
-    print("wrote", out)
+    main()
